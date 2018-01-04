@@ -1,4 +1,4 @@
-## Home Assistant component for Roon (roonlabs.com)
+## Home Assistant component for Roon
 
 Custom component for Home Assistant (www.home-assistant.io) to control Roon (www.roonlabs.com) zones as mediaplayers.
 
