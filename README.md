@@ -1,6 +1,6 @@
 ## Home Assistant component for Roon (roonlabs.com)
 
-Custom component for Home Assistant (www.home-assistant.io) to control Roon zones as mediaplayers.
+Custom component for Home Assistant (www.home-assistant.io) to control Roon (www.roonlabs.com) zones as mediaplayers.
 
 
 ## Installation
@@ -66,10 +66,9 @@ It's my plan to replace this by direct api calls once I get some more info about
 ## Bonus: player widget for hass frontend
 For my own usecase I've added some code to automate some stuff with the mediaplayers to have some sort of "easy access" controls available in the hass frontend.
 
-1. group.roon_players
-    This group will be auto added and contains all your Roon media players.
+1. group.roon_players: This group will be auto added and contains all your Roon media players.
 
-2. players and playlists widget
+2. players and playlists widget: 
     Add the following code to your hass configuration.yaml:
     ```
     input_number:
@@ -110,6 +109,8 @@ For my own usecase I've added some code to automate some stuff with the mediapla
     ```
 
     Now add this group (group.roon_actions) to one of your views.
+    
+    Offcourse if you ommit these objects, this part of the code won't be used at all.
 
 
 ## Feedback and TODO
@@ -119,7 +120,7 @@ Let's test it, fix it and when stable enough submit it to Home Assistant for inc
 
 Please use the Roon forum to discuss the progress:
 
-https://community.roonlabs.com/t/roon-module-for-home-assistant/36186
+https://community.roonlabs.com/t/roon-module-for-home-assistant
 
 
 TO-DO:
