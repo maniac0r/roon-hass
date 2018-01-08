@@ -34,7 +34,7 @@ It's my plan to replace this by direct api calls once I get some more info about
 
    ```
     media_player:
-      - platform: roon:
+      - platform: roon
         host: hostname_or_ip
         port: 3006
     ```
