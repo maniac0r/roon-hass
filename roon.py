@@ -39,6 +39,8 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_HOST = 'localhost'
 DEFAULT_PORT = 3006
 TIMEOUT = 10
+POLL_INTERVAL = 2
+UPDATE_PLAYLISTS_INTERVAL = 300
 
 SUPPORT_ROON = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_SELECT_SOURCE | SUPPORT_STOP | \
     SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SHUFFLE_SET | \
@@ -513,9 +515,11 @@ class RoonServer(object):
         self._init_playlists_done = False
         self._initial_playlist = None
         self._initial_player = None
-        self._update_count = 55
+        self.all_player_names = []
+        self.all_playlists = []
+        self.all_player_entities = []
+        self.offline_devices = []
 
-        
 
     @property
     def devices(self):
@@ -613,10 +617,17 @@ class RoonServer(object):
                 _LOGGER.debug("update volumeslider for player %s to %s" %(player_entity, player_volume))
                 yield from self.hass.services.async_call("input_number", "set_value", 
                     {"entity_id": "input_number.roon_volume", "value": player_volume})
+        
+        # volume slider was adjusted
         elif changed_entity == "input_number.roon_volume" and player_entity:
+            
             # new player chosen - set volume slider
             if selected_volume == float(0):
                 # volume slider set to 0, treat this as power off
+                yield from asyncio.sleep(0.5, self.hass.loop)
+                # double check to prevent some race condition
+                if self.hass.states.get("input_select.roon_players").state == self._initial_player:
+                    return
                 _LOGGER.info("turn off player %s" %(player_entity))
                 yield from self.hass.services.async_call("media_player", "turn_off", 
                     {"entity_id": player_entity})
@@ -636,11 +647,19 @@ class RoonServer(object):
     def do_loop(self):
         '''refresh players loop'''
         _LOGGER.debug("Starting background refresh loop")
+        playlist_update_ticks = UPDATE_PLAYLISTS_INTERVAL
         
         self._exit = False
         while not self._exit:
+            # update players every poll interval
             yield from self.update_players()
-            yield from asyncio.sleep(5, self.hass.loop)
+            # update playlists and players group every minute
+            if playlist_update_ticks >= (UPDATE_PLAYLISTS_INTERVAL / POLL_INTERVAL):
+                playlist_update_ticks = 0
+                yield from self.update_playlists()
+            else:
+                playlist_update_ticks += 1
+            yield from asyncio.sleep(POLL_INTERVAL, self.hass.loop)
 
 
     @asyncio.coroutine
@@ -648,7 +667,7 @@ class RoonServer(object):
         """Create a list of outputs connected to Roon."""
         new_devices = []
         cur_devices = []
-        self._update_count += 1
+        force_playlist_update = False
         result = yield from self.async_query('zones')
         if not result or result["last_change"] == self._last_change:
             return False # no update needed
@@ -660,7 +679,6 @@ class RoonServer(object):
         for zone in zones.values():
             output = zone['outputs'][0]['output_id'] # first output is the sync master
             cur_zones[zone["zone_id"]] = {"name": zone["display_name"], "output": output}
-        zones_changed = len(self._zones.keys()) != len(cur_zones.keys())
         self._zones = cur_zones
 
         #build devices listing
@@ -678,28 +696,33 @@ class RoonServer(object):
                     self._devices[dev_id] = player
                 elif player_data["last_changed"] != self._devices[dev_id].last_changed:
                     # device was updated
+                    if dev_id in self.offline_devices:
+                        _LOGGER.info("player back online: %s" % self._devices[dev_id].entity_id)
+                        force_playlist_update = True
+                        self.offline_devices.remove(dev_id)
+                        self._devices[dev_id].set_available(True)
                     self._devices[dev_id].update_data(player_data)
                     self._do_update_callback(dev_id)
                     yield from self.hass_event(self._devices[dev_id].entity_id)
                     
         # check for any removed devices
-        removed_devices = []
         for dev_id in self._devices.keys():
-            if dev_id not in cur_devices:
+            if dev_id not in cur_devices and dev_id not in self.offline_devices:
                 entity_id = self._devices[dev_id].entity_id
                 if entity_id:
                     _LOGGER.info("player removed/offline: %s" %entity_id)
-                    self.hass.states.async_remove(entity_id)
-                    removed_devices.append(dev_id)
-        for device in removed_devices:
-            self._devices.pop(device)
+                    self.offline_devices.append(dev_id)
+                    self._devices[dev_id].set_available(False)
+                    self._do_update_callback(dev_id)
+                    force_playlist_update = True
+                    yield from self.hass_event(self._devices[dev_id].entity_id)
+
 
         if new_devices:
+            force_playlist_update = True
             self._add_devices_callback(new_devices, True)
 
-        # update playlists and players group every 5 minutes
-        if zones_changed or new_devices or self._update_count >= 60:
-            self._update_count = 0
+        if force_playlist_update:
             yield from self.update_playlists()
 
 
@@ -717,13 +740,31 @@ class RoonServer(object):
             _LOGGER.warning("input_number and input_select objects do not (yet) exist. Skip playlist generation...")
             return False
 
-        all_player_names = [self._initial_player] + [dev.name for dev in self._devices.values()]
-        yield from self.hass.services.async_call("input_select", 
-                "set_options", {"entity_id": "input_select.roon_players", "options": all_player_names})
+        # get all current player names and entities
+        all_player_names = [self._initial_player]
+        all_player_entities = []
+        for dev in self._devices.values():
+            if dev.output_id not in self.offline_devices:
+                entity_id = dev.entity_id
+                if not entity_id:
+                    entity_id = "media_player.%s" % dev.name.lower().replace(" ", "_")
+                all_player_entities.append(entity_id)
+                all_player_names.append(dev.name)
+
+        # fill input select with player names
+        if len(str(all_player_names)) != len(str(self.all_player_names)):
+            # only (re)fill the listing if there are changes
+            self.all_player_names = all_player_names
+            yield from self.hass.services.async_call("input_select", 
+                    "set_options", {"entity_id": "input_select.roon_players", "options": all_player_names})
+            yield from self.hass.services.async_call("input_select", 
+                    "select_option", {"entity_id": "input_select.roon_players", "option": self._initial_player})
         
         # fill group.roon_players
-        all_player_entities = [dev.entity_id for dev in self._devices.values()]
-        yield self.hass.states.async_set("group.roon_players", "", {"entity_id": all_player_entities})
+        if len(str(all_player_entities)) != len(str(self.all_player_entities)):
+            # only (re)fill the listing if there are changes
+            self.all_player_entities = all_player_entities
+            yield self.hass.states.async_set("group.roon_players", "", {"entity_id": all_player_entities})
         
         # fill playlists input_select
         roon_playlists = yield from self.async_query("browse/playlists")
@@ -732,8 +773,13 @@ class RoonServer(object):
             all_playlists.append("Playlist: %s" %item)
         for item in roon_playlists["radios"]:
             all_playlists.append("Radio: %s" % item)
-        yield from self.hass.services.async_call("input_select", "set_options", 
-                {"entity_id": "input_select.roon_playlists", "options": all_playlists})
+        if len(str(all_playlists)) != len(str(self.all_playlists)):
+            # only send update to hass if there were changes
+            self.all_playlists = all_playlists
+            yield from self.hass.services.async_call("input_select", "set_options", 
+                    {"entity_id": "input_select.roon_playlists", "options": all_playlists})
+            yield from self.hass.services.async_call("input_select", "select_option", 
+                    {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
         
         # register callback to track state changes of our special input selects
         if not self._init_playlists_done:
