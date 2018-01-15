@@ -41,6 +41,7 @@ DEFAULT_PORT = 3006
 TIMEOUT = 10
 POLL_INTERVAL = 2
 UPDATE_PLAYLISTS_INTERVAL = 300
+AUTO_SYNC = True
 
 SUPPORT_ROON = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_SELECT_SOURCE | SUPPORT_STOP | \
     SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SHUFFLE_SET | \
@@ -76,14 +77,13 @@ class RoonDevice(MediaPlayerDevice):
 
     def __init__(self, server, player_data):
         """Initialize Roon device object."""
-        #super(RoonDevice, self).__init__()
         self._sources = []
         self._server = server
         self._available = True
         self._device_id = player_data["output_id"]
         self._last_position_update = None
         self._supports_standby = False
-        self._source_standby = False
+        self._state = STATE_IDLE
         self.update_data(player_data)
         _LOGGER.info("New Roon Device initialized with ID: %s", self._device_id)
 
@@ -115,7 +115,6 @@ class RoonDevice(MediaPlayerDevice):
     def async_update(self):
         """Retrieve the current state of the player."""
         _LOGGER.debug("async_update called for %s" %self.entity_id)
-        #player_data = self._server.devices[self.output_id].player_data
         self.update_data(self.player_data)
 
 
@@ -126,15 +125,44 @@ class RoonDevice(MediaPlayerDevice):
             self.player_data = player_data
         # create sources list
         self._sources = self.get_sync_zones()
-        self._available = player_data["is_available"]
+        self._available = self.player_data["is_available"]
         if self.state == STATE_PLAYING:
             self._last_position_update = utcnow()
-        if 'source_controls' in self.player_data:
-            for source in self.player_data["source_controls"]:
-                if source["supports_standby"] and not source["status"] == "indeterminate":
-                    self._supports_standby = True
-                if source["supports_standby"] and source["status"] == "standby":
-                    self._source_standby = True
+        # determine player state
+        self.update_state()
+        
+    def update_state(self):
+        ''' update the power state and player state '''
+        if not self.available:
+            self._state = STATE_OFF
+        else:
+            cur_state = self._state
+            new_state = ""
+            # power state from source control (if supported)
+            if 'source_controls' in self.player_data:
+                for source in self.player_data["source_controls"]:
+                    if source["supports_standby"]:
+                        if not source["status"] == "indeterminate":
+                            self._supports_standby = True
+                        if source["status"] == "standby":
+                            new_state = STATE_OFF
+                        else:
+                            new_state = STATE_IDLE
+            # determine player state
+            if self.supports_standby and not new_state == STATE_OFF:
+                if self.player_data['state'] == 'playing':
+                    new_state = STATE_PLAYING
+                elif self.player_data['state'] == 'stopped':
+                    new_state = STATE_IDLE
+                elif self.player_data['state'] == 'paused':
+                    new_state = STATE_PAUSED
+            else:
+                # for devices that don't support standby its either playing or off
+                if self.player_data['state'] == 'playing':
+                    new_state = STATE_PLAYING
+                else:
+                    new_state = STATE_OFF
+            self._state = new_state
 
 
     @asyncio.coroutine
@@ -252,7 +280,7 @@ class RoonDevice(MediaPlayerDevice):
         try:
             return int(self.player_data['now_playing']['seek_position'])
         except (KeyError, TypeError):
-            return None
+            return 0
 
     @property
     def media_duration(self):
@@ -261,7 +289,7 @@ class RoonDevice(MediaPlayerDevice):
             return int(
                 self.player_data['now_playing']['length'])
         except (KeyError, TypeError):
-            return None
+            return 0
 
     @property
     def media_percent_played(self):
@@ -269,8 +297,7 @@ class RoonDevice(MediaPlayerDevice):
         try:
             return (self.media_position / self.media_runtime) * 100
         except (KeyError, TypeError):
-            return None
-
+            return 0
 
     @property
     def volume_level(self):
@@ -280,8 +307,7 @@ class RoonDevice(MediaPlayerDevice):
                 return int(self.player_data['volume']['value'] + 80) / 100
             return int(self.player_data['volume']['value']) / 100
         except (KeyError, TypeError):
-            return None
-
+            return 0
 
     @property
     def is_volume_muted(self):
@@ -291,7 +317,6 @@ class RoonDevice(MediaPlayerDevice):
         except (KeyError, TypeError):
             return False
 
-
     @property
     def volume_step(self):
         """ Return total runtime length."""
@@ -299,43 +324,22 @@ class RoonDevice(MediaPlayerDevice):
             return int(
                 self.player_data['volume']['step'])
         except (KeyError, TypeError):
-            return None
-
+            return 0
 
     @property
     def supports_standby(self):
         '''return power state of source controls'''
         return self._supports_standby
 
-
     @property
     def state(self):
         """ Return current playstate of the device. """
-        if not self.available:
-            return STATE_OFF
-        elif self.supports_standby:
-            if self._source_standby:
-                return STATE_OFF
-            elif self.player_data['state'] == 'playing':
-                return STATE_PLAYING
-            elif self.player_data['state'] == 'stopped':
-                return STATE_IDLE
-            elif self.player_data['state'] == 'paused':
-                return STATE_PAUSED
-        else:
-            # for devices that don't support standby its either playing or off
-            if self.player_data['state'] == 'playing':
-                    return STATE_PLAYING
-            else:
-                return STATE_OFF
+        return self._state
 
     @property
     def is_nowplaying(self):
         """ Return true if an item is currently active. """
-        if self.state == STATE_PLAYING:
-            return True
-        else:
-            return False
+        return self.state == STATE_PLAYING
 
     @property
     def source(self):
@@ -361,7 +365,7 @@ class RoonDevice(MediaPlayerDevice):
         try:
             return self.player_data['settings']['loop']
         except (KeyError, TypeError):
-            return None
+            return False
 
     @property
     def auto_radio(self):
@@ -412,12 +416,12 @@ class RoonDevice(MediaPlayerDevice):
 
     def async_volume_up(self):
         """ Send new volume_level to device. """
-        new_vol = self.volume_level + self.volume_step
+        new_vol = self.volume_level + 0.05
         return self.async_set_volume_level(new_vol)
 
     def async_volume_down(self):
         """ Send new volume_level to device. """
-        new_vol = self.volume_level - self.volume_step
+        new_vol = self.volume_level - 0.05
         return self.async_set_volume_level(new_vol)
 
     def async_turn_on(self):
@@ -429,11 +433,12 @@ class RoonDevice(MediaPlayerDevice):
 
     def async_turn_off(self):
         """ Turn off device (if supported) """
-        if self.player_data["is_synced"]:
-            yield from self._server.async_query("ungroup_output", {"output":self.output_id } )
+        if self.player_data['is_synced']:
+            yield from self._server.async_query("ungroup_output", {"output": self.output_id } )
         if not self.supports_standby:
             yield from self._server.async_query("control", {"control":"stop", "zone": self.output_id} )
-        return self._server.async_query("standby", {"output": self.output_id} )
+        else:
+            yield from self._server.async_query("standby", {"output": self.output_id} )
 
     def async_shuffle_set(self, shuffle):
         """ Set shuffle state on zone """
@@ -462,11 +467,13 @@ class RoonDevice(MediaPlayerDevice):
     def async_select_source(self, source):
         '''select source on player (used to sync/unsync)'''
         if source == self.name:
+            self._last_sync_zone = None
             return self._server.async_query("ungroup_output", {"output": self.output_id } )
         else:
             for zone_id, zone in self._server.zones.items():
                 if zone["name"].lower() == source.lower():
                     _LOGGER.info("select source called - sync %s with %s" %(self.name, zone["name"]))
+                    self._last_sync_zone = zone_id
                     return self._server.async_query("add_to_group", {"output": self.output_id, "zone": zone_id } )
         return None
 
@@ -483,21 +490,6 @@ class RoonDevice(MediaPlayerDevice):
         else:
         	_LOGGER.info("Playback requested of %s --> %s" %(media_type, media_id))
 
-    @asyncio.coroutine
-    def play_playlist(self, source_path):
-        # playlist or internet radio requested
-        main_listing = yield from self._server.async_query("goHome?zoneId=%s" % self.output_id)
-        count = 0
-        if main_listing:
-            for list_item in main_listing["list"]:
-                if list_item["title"] == source_path[0]:
-                    item_key = list_item["item_path"]
-                    for sub_path in source_path[1:]:
-                        sub_listing = yield from self._server.async_query("listByItemKey?zoneId=%s&item_key=%s" % (self.output_id, item_key))
-                        if not sub_listing:
-                            break
-                        item_key = sub_listing[0]["item_key"]
-        return True
 
 class RoonServer(object):
     """Roon test."""
@@ -597,7 +589,7 @@ class RoonServer(object):
         if changed_entity == "input_select.roon_playlists" and selected_playlist == self._initial_playlist:
             # the playlist-selector was restored to default selection, ignore...
             return
-        elif changed_entity == "input_select.roon_players" and selected_player == self._initial_player:
+        elif selected_player == self._initial_player:
             # the player-selector was restored to default selection, ignore...
             yield from self.hass.services.async_call("input_number", "set_value", 
                     {"entity_id": "input_number.roon_volume", "value": 0})
@@ -768,18 +760,19 @@ class RoonServer(object):
         
         # fill playlists input_select
         roon_playlists = yield from self.async_query("browse/playlists")
-        all_playlists = [self._initial_playlist]
-        for item in roon_playlists["playlists"]:
-            all_playlists.append("Playlist: %s" %item)
-        for item in roon_playlists["radios"]:
-            all_playlists.append("Radio: %s" % item)
-        if len(str(all_playlists)) != len(str(self.all_playlists)):
-            # only send update to hass if there were changes
-            self.all_playlists = all_playlists
-            yield from self.hass.services.async_call("input_select", "set_options", 
-                    {"entity_id": "input_select.roon_playlists", "options": all_playlists})
-            yield from self.hass.services.async_call("input_select", "select_option", 
-                    {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
+        if roon_playlists:
+            all_playlists = [self._initial_playlist]
+            for item in roon_playlists["playlists"]:
+                all_playlists.append("Playlist: %s" %item)
+            for item in roon_playlists["radios"]:
+                all_playlists.append("Radio: %s" % item)
+            if len(str(all_playlists)) != len(str(self.all_playlists)):
+                # only send update to hass if there were changes
+                self.all_playlists = all_playlists
+                yield from self.hass.services.async_call("input_select", "set_options", 
+                        {"entity_id": "input_select.roon_playlists", "options": all_playlists})
+                yield from self.hass.services.async_call("input_select", "select_option", 
+                        {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
         
         # register callback to track state changes of our special input selects
         if not self._init_playlists_done:
