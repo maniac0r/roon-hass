@@ -10,6 +10,7 @@ import asyncio
 import json
 import aiohttp
 import async_timeout
+import time
 
 from homeassistant.components.media_player import (
     ATTR_MEDIA_ENQUEUE, SUPPORT_PLAY_MEDIA, SUPPORT_SELECT_SOURCE, SUPPORT_STOP, SUPPORT_SHUFFLE_SET,
@@ -41,7 +42,7 @@ DEFAULT_PORT = 3006
 TIMEOUT = 10
 POLL_INTERVAL = 2
 UPDATE_PLAYLISTS_INTERVAL = 300
-AUTO_SYNC = True
+CONF_NOTIFY = "enable_notifications"
 
 SUPPORT_ROON = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_SELECT_SOURCE | SUPPORT_STOP | \
     SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SHUFFLE_SET | \
@@ -50,17 +51,19 @@ SUPPORT_ROON = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_SELECT_SOURCE | SUPP
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_HOST, default=DEFAULT_HOST): cv.string,
-    vol.Optional(CONF_PORT, default=None): cv.port,
+    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    vol.Optional(CONF_NOTIFY, default=False): cv.boolean,
 })
 
 
 @asyncio.coroutine
 def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
     """Set up the Roon platform."""
-    host = config.get(CONF_HOST) or DEFAULT_HOST
-    port = config.get(CONF_PORT) or DEFAULT_PORT
+    host = config.get(CONF_HOST)
+    port = config.get(CONF_PORT)
+    notifications = config.get(CONF_NOTIFY)
     _LOGGER.info("Creating RoonServer object for %s", host)
-    roon = RoonServer(hass, host, port, async_add_devices)
+    roon = RoonServer(hass, host, port, notifications, async_add_devices)
 
     @asyncio.coroutine
     def stop_roon(event):
@@ -144,24 +147,19 @@ class RoonDevice(MediaPlayerDevice):
                     if source["supports_standby"]:
                         if not source["status"] == "indeterminate":
                             self._supports_standby = True
-                        if source["status"] == "standby":
-                            new_state = STATE_OFF
-                        else:
-                            new_state = STATE_IDLE
+                            if source["status"] == "standby":
+                                new_state = STATE_OFF
+                            break
             # determine player state
-            if self.supports_standby and not new_state == STATE_OFF:
+            if not new_state:
                 if self.player_data['state'] == 'playing':
                     new_state = STATE_PLAYING
                 elif self.player_data['state'] == 'stopped':
                     new_state = STATE_IDLE
                 elif self.player_data['state'] == 'paused':
                     new_state = STATE_PAUSED
-            else:
-                # for devices that don't support standby its either playing or off
-                if self.player_data['state'] == 'playing':
-                    new_state = STATE_PLAYING
                 else:
-                    new_state = STATE_OFF
+                    new_state = STATE_IDLE
             self._state = new_state
 
 
@@ -375,7 +373,6 @@ class RoonDevice(MediaPlayerDevice):
         except (KeyError, TypeError):
             return False
 
-
     def async_media_play(self):
         """ Send play command to device. """
         return self._server.async_query("control", {"control":"play", "zone": self.output_id} )
@@ -417,12 +414,18 @@ class RoonDevice(MediaPlayerDevice):
     def async_volume_up(self):
         """ Send new volume_level to device. """
         new_vol = self.volume_level + 0.05
-        return self.async_set_volume_level(new_vol)
+        if new_vol < 1:
+            return self.async_set_volume_level(new_vol)
+        else:
+            return False
 
     def async_volume_down(self):
         """ Send new volume_level to device. """
         new_vol = self.volume_level - 0.05
-        return self.async_set_volume_level(new_vol)
+        if new_vol > 0:
+            return self.async_set_volume_level(new_vol)
+        else:
+            return False
 
     def async_turn_on(self):
         """ Turn on device (if supported) """
@@ -433,12 +436,10 @@ class RoonDevice(MediaPlayerDevice):
 
     def async_turn_off(self):
         """ Turn off device (if supported) """
-        if self.player_data['is_synced']:
-            yield from self._server.async_query("ungroup_output", {"output": self.output_id } )
         if not self.supports_standby:
-            yield from self._server.async_query("control", {"control":"stop", "zone": self.output_id} )
+            return self._server.async_query("control", {"control":"stop", "zone": self.output_id} )
         else:
-            yield from self._server.async_query("standby", {"output": self.output_id} )
+            return self._server.async_query("standby", {"output": self.output_id} )
 
     def async_shuffle_set(self, shuffle):
         """ Set shuffle state on zone """
@@ -467,13 +468,11 @@ class RoonDevice(MediaPlayerDevice):
     def async_select_source(self, source):
         '''select source on player (used to sync/unsync)'''
         if source == self.name:
-            self._last_sync_zone = None
             return self._server.async_query("ungroup_output", {"output": self.output_id } )
         else:
             for zone_id, zone in self._server.zones.items():
                 if zone["name"].lower() == source.lower():
                     _LOGGER.info("select source called - sync %s with %s" %(self.name, zone["name"]))
-                    self._last_sync_zone = zone_id
                     return self._server.async_query("add_to_group", {"output": self.output_id, "zone": zone_id } )
         return None
 
@@ -482,19 +481,29 @@ class RoonDevice(MediaPlayerDevice):
         """
         Send the play_media command to the media player.
         """
+        if self.state == STATE_OFF:
+            yield from self.async_turn_on()
+            time.sleep(1)
         media_type = media_type.lower()
         if media_type == "radio":
-            return self._server.async_query("play/radio", {"name": media_id, "zone": self.zone_id } )
+            yield from self._server.async_query("play/radio", {"name": media_id, "zone": self.zone_id } )
         elif media_type == "playlist":
-            return self._server.async_query("play/playlist", {"name": media_id, "zone": self.zone_id } )
+            yield from self._server.async_query("play/playlist", {"name": media_id, "zone": self.zone_id } )
+        elif media_id.startswith("http") and self._server.notifications_enabled:
+            _LOGGER.info("Playback requested of notification ! %s --> %s" %(media_type, media_id))
+            yield from self.hass.services.async_call("mqtt", "publish", 
+                {"topic": "%s/notify" % self.name.lower(), "payload": media_id, "retain": False})
+            _LOGGER.info(self.name.lower())
+            return False
         else:
-        	_LOGGER.info("Playback requested of %s --> %s" %(media_type, media_id))
+            _LOGGER.info("Playback requested of unsupported type: %s --> %s" %(media_type, media_id))
+            return False
 
 
 class RoonServer(object):
     """Roon test."""
 
-    def __init__(self, hass, host, port, add_devices_callback):
+    def __init__(self, hass, host, port, notifications, add_devices_callback):
         """Initialize base class."""
         self.hass = hass
         self.host = host
@@ -511,6 +520,8 @@ class RoonServer(object):
         self.all_playlists = []
         self.all_player_entities = []
         self.offline_devices = []
+        self._selected_player = ""
+        self.notifications_enabled = notifications
 
 
     @property
@@ -552,39 +563,55 @@ class RoonServer(object):
                 self.hass.loop.call_soon(callback, dev_id)
 
     @asyncio.coroutine
+    def update_volume(self, output_data):
+        ''' update volume slider if needed'''
+        if self._selected_player != output_data['display_name'] or not self._init_playlists_done:
+            return False
+        slider_vol = float(self.hass.states.get("input_number.roon_volume").state)
+        try:
+            if output_data["volume"]["type"] == "db":
+                output_vol = float(output_data['volume']['value'] + 80) / 100
+            else:
+                output_vol = float(output_data['volume']['value']) / 100
+        except (KeyError, TypeError):
+            output_vol = 0
+        if slider_vol != output_vol:
+            _LOGGER.info("player volume updated, update slider")
+            yield from self.hass.services.async_call("input_number", "set_value", 
+                    {"entity_id": "input_number.roon_volume", "value": output_vol})
+        return True
+
+
+    @asyncio.coroutine
     def hass_event(self, changed_entity, from_state="", to_state=""):
         _LOGGER.debug("hass_event event fired !! --> %s changed" % (changed_entity))
 
         if changed_entity == "input_select.roon_players":
             selected_player = to_state.state
+            self._selected_player = selected_player
         else:
             selected_player = self.hass.states.get("input_select.roon_players").state
-        
-        if changed_entity == "input_number.roon_volume":
-            selected_volume = float(to_state.state)
-        else:
-            selected_volume = float(self.hass.states.get("input_number.roon_volume").state)
         
         if changed_entity == "input_select.roon_playlists":
             selected_playlist = to_state.state
         else:
             selected_playlist = None
         
-        player_volume = float(0)
+        player_volume = 0
         player_entity = ""
         player_state = STATE_OFF
 
         # get player entity_id and volume level
         for dev in self._devices.values():
-            if dev.name == selected_player or dev.entity_id == changed_entity:
-                player_volume = float(dev.volume_level)
+            if dev.name == selected_player:
+                player_volume = dev.volume_level
                 player_entity = dev.entity_id
                 player_state = dev.state
                 break
         
         # show volume slider as 0 if player is turned off
         if player_state == STATE_OFF:
-            player_volume = float(0)
+            player_volume = 0
 
         if changed_entity == "input_select.roon_playlists" and selected_playlist == self._initial_playlist:
             # the playlist-selector was restored to default selection, ignore...
@@ -603,18 +630,17 @@ class RoonServer(object):
             # restore playlist selector to default value
             yield from self.hass.services.async_call("input_select", "select_option", 
                 {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
-        elif changed_entity == "input_select.roon_players" or changed_entity == player_entity:
-            # new player chosen or player updated - set volume slider
-            if player_volume != selected_volume:
-                _LOGGER.debug("update volumeslider for player %s to %s" %(player_entity, player_volume))
-                yield from self.hass.services.async_call("input_number", "set_value", 
-                    {"entity_id": "input_number.roon_volume", "value": player_volume})
+        elif changed_entity == "input_select.roon_players":
+            # new player chosen - set volume slider
+            _LOGGER.debug("update volumeslider for player %s to %s" %(player_entity, player_volume))
+            yield from self.hass.services.async_call("input_number", "set_value", 
+                {"entity_id": "input_number.roon_volume", "value": player_volume})
         
         # volume slider was adjusted
         elif changed_entity == "input_number.roon_volume" and player_entity:
-            
+            selected_volume = float(to_state.state)
             # new player chosen - set volume slider
-            if selected_volume == float(0):
+            if selected_volume == 0:
                 # volume slider set to 0, treat this as power off
                 yield from asyncio.sleep(0.5, self.hass.loop)
                 # double check to prevent some race condition
@@ -676,6 +702,10 @@ class RoonServer(object):
         #build devices listing
         for zone in zones.values():
             for device in zone["outputs"]:
+
+                if device['display_name'].startswith('sync_'):
+                    # ignore sync devices
+                    continue
                 player_data = yield from self.createplayer_data(zone, device)
                 dev_id = player_data["output_id"]
                 cur_devices.append(dev_id)
@@ -695,7 +725,7 @@ class RoonServer(object):
                         self._devices[dev_id].set_available(True)
                     self._devices[dev_id].update_data(player_data)
                     self._do_update_callback(dev_id)
-                    yield from self.hass_event(self._devices[dev_id].entity_id)
+                    yield from self.update_volume(player_data)
                     
         # check for any removed devices
         for dev_id in self._devices.keys():
@@ -707,8 +737,6 @@ class RoonServer(object):
                     self._devices[dev_id].set_available(False)
                     self._do_update_callback(dev_id)
                     force_playlist_update = True
-                    yield from self.hass_event(self._devices[dev_id].entity_id)
-
 
         if new_devices:
             force_playlist_update = True
