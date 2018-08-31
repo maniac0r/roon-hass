@@ -8,17 +8,11 @@ Custom component for Home Assistant (www.home-assistant.io) to control Roon (www
 While this is a work in progress, the component must be installed as a custom component on your hass setup.
 Once stable, it will be submitted to the hass source for inclusion.
 
-For now, the python code of this hass component is not directly talking to the Roon api as there is not yet a python SDK/API released by Roon itself.
-So for the time being a intermediate webservice is used which talks to the nodeJS api making it available as restfull services for the python code.
-It's my plan to replace this by direct api calls once I get some more info about the websockets api that Roon provides.
+Update August 2018: The add-on is almost ready for prime time (release to home assistant as official addon).
+It's talking directly to the Roon server now (using the tcp socket) so no more need for the nodejs proxy.
 
 
-1. Download and install the webproxy
-    Download and install the api proxy nodeJS module from https://github.com/marcelveldt/roon-extension-api-proxy
-    Make sure it's up and running (by default on port 3006) before you continue.
-
-
-2. Download/install the hass component
+1. Download/install the hass component
 
    * Download roon.py of this Github repo into a local folder. 
 
@@ -36,17 +30,19 @@ It's my plan to replace this by direct api calls once I get some more info about
     media_player:
       - platform: roon
         host: hostname_or_ip
-        port: 3006
     ```
 
-    For the host and port parameters give the host where you are running the NodeJS proxy from step 1.
-    You can ommit host if it's running on the same host as hass.
-    You can ommit port if it's setup at the default port 3006.
+    For the host and port parameters give the host where you are Roon.
+    You can ommit host if you only have 1 Roon server in your network, it will be auto discovered.
+
+3. Almost Done !
+
+    Now restart Home Assistant and approve the addon within Roon (extensions section).
 
 
 3. Done !
 
-    Now restart Home Assistant and within a few seconds after hass is started, your players should appear.
+    After the approval, within a few seconds your players should appear in Home Assistant.
 
 
 ## What is supported ?
@@ -54,7 +50,6 @@ It's my plan to replace this by direct api calls once I get some more info about
 * All player command are supported, like controlling the volume, play/pause, next etc.
 * Each player represents a "Roon output". A zone with multiple outputs will be displayed as multiple media players in hass.
 * The source of each hass media player represents the Roon zone it's attached to.
-* You can change the source of the hass mediaplayer to group the output into another zone (zone grouping)
 * You can start playback of Playlists or Internet Radio, playback of other content is not yet supported.
 * To start a playlist, set the name of the playlist as the "media_content_id" and set "media_content_type" to "playlist".
 * To start a radio, set the name of the radio station as the "media_content_id" and set "media_content_type" to "radio".
@@ -125,11 +120,10 @@ https://community.roonlabs.com/t/roon-module-for-home-assistant
 
 TO-DO:
 
-* Connect to Roon websockets api directly instead of using the nodeJS proxy.
-* Support playback of media files (if only I could find out how in the api)
-* Support text to speach playback
-* Support of notifications and alarm signals on Roon zones.
-* Optimize zones adding/removal.
+* [DONE] Connect to Roon websockets api directly instead of using the nodeJS proxy.
+* [NOT POSSIBLE] Support playback of media files (if only I could find out how in the api)
+* Support text to speech playback [DONE WITH WORKAROUND - more info soon]
+* Support of notifications and alarm signals on Roon zones. [DONE WITH WORKAROUND - more info soon]
 * cleanup code / pep8 compliance
 
 
