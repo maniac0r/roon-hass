@@ -76,7 +76,7 @@ def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
             "display_version": "1.0.0",
             "publisher": "marcelveldt",
             "email": "marcelveldt@users.noreply.github.com",
-            "website": "https://github.com/marcelveldt/hass-roon"
+            "website": "https://github.com/marcelveldt/roon-hass"
         }
     token = None
     token_file = hass.config.path(TOKEN_FILE)
@@ -85,14 +85,14 @@ def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
         with open(token_file) as f:
             token = f.read()
     if not token:
-        LOGGER.warning("App not yet registered within Roon. You should allow it in Roon's settings.")
+        _LOGGER.warning("App not yet registered within Roon. You should allow it in Roon's settings.")
 
     source_controls = config.get(CONF_SOURCE_CONTROLS)
     volume_controls = config.get(CONF_VOLUME_CONTROLS)
     registed_source_controls = []
     registered_volume_controls = []
 
-    roonapi = RoonApi(appinfo, token, host, blocking_init=True)
+    roonapi = RoonApi(appinfo, token, host, blocking_init=False)
     roon = RoonServer(hass, roonapi, async_add_devices, custom_play_action)
 
     def roon_source_control_callback(control_key, new_state):
