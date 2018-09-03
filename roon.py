@@ -40,7 +40,7 @@ except AttributeError:
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['roonapi>=0.0.13']
+REQUIREMENTS = ['roonapi>=0.0.15']
 
 TOKEN_FILE = '.roontoken'
 
