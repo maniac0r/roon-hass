@@ -89,82 +89,20 @@ def async_setup_platform(hass, config, async_add_devices, discovery_info=None):
 
     source_controls = config.get(CONF_SOURCE_CONTROLS)
     volume_controls = config.get(CONF_VOLUME_CONTROLS)
-    registed_source_controls = []
-    registered_volume_controls = []
 
     roonapi = RoonApi(appinfo, token, host, blocking_init=False)
-    roon = RoonServer(hass, roonapi, async_add_devices, custom_play_action)
-
-    def roon_source_control_callback(control_key, new_state):
-        entity_obj = hass.states.get(control_key)
-        if "media_player" in control_key and "roon" in entity_obj.attributes.get("source_list", []):
-            if new_state == "standby" and entity_obj.attributes.get("source", "") == "roon":
-                hass.services.call('media_player', "turn_off", {"entity_id": control_key})
-            elif new_state == "convenience_switch":
-                hass.services.call('media_player', "select_source", {"entity_id": control_key, "source": "roon"})
-        else:
-            # just use on/off control
-            svc = "turn_off" if new_state == "standby" else "turn_on"
-            hass.services.call('homeassistant', svc, {"entity_id": control_key})
-
-    def roon_volume_control_callback(control_key, event, data):
-        if event == "set_mute":
-            hass.services.call('media_player', "volume_mute", {"entity_id": control_key, "is_volume_muted": data})
-        elif event == "set_volume":
-            hass_vol = data/100
-            hass.services.call('media_player', "volume_set", {"entity_id": control_key, "volume_level": hass_vol})
-
-
-    @asyncio.coroutine
-    def hass_state_event(entity_id, old_state, new_state ):
-        entity_obj = hass.states.get(entity_id)
-        if entity_id in source_controls:
-            old_state = old_state.state if old_state else None
-            if "media_player" in entity_id and "roon" in entity_obj.attributes.get("source_list", []):
-                if new_state.attributes.get("source", "") == "roon":
-                    src_state = "selected"
-                elif new_state.state == "off":
-                    src_state = "standby"
-                else:
-                    src_state = "deselected"
-            else:
-                src_state = "selected" if new_state.state == "on" else "standby"
-            if not entity_id in registed_source_controls:
-                # register as source control
-                registed_source_controls.append(entity_id)
-                roonapi.register_source_control(entity_id, entity_obj.attributes.get("friendly_name"), roon_source_control_callback, src_state)
-            else:
-                new_state = new_state.state if new_state else None
-                roonapi.update_source_control(entity_id, src_state)
-        if entity_id in volume_controls:
-            cur_vol = entity_obj.attributes.get("volume_level", 0) * 100
-            cur_mute = entity_obj.attributes.get("is_volume_muted", False)
-            if not entity_id in registered_volume_controls:
-                # register as volume control
-                registered_volume_controls.append(entity_id)
-                roonapi.register_volume_control(entity_id, entity_obj.attributes.get("friendly_name"), roon_volume_control_callback, cur_vol, is_muted=cur_mute)
-            else:
-                roonapi.update_volume_control(entity_id, cur_vol, cur_mute)
-
+    roon = RoonServer(hass, roonapi, async_add_devices, custom_play_action, source_controls, volume_controls)
 
     @asyncio.coroutine
     def stop_roon(event):
         """Stop Roon connection."""
         _LOGGER.debug("stop requested")
-        with open(token_file, 'w') as f:
-            f.write(roonapi.token)
+        if roonapi.token:
+            open(token_file, 'w').write(roonapi.token)
         roonapi.stop()
         roon.stop_roon()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_roon)
-    if source_controls or volume_controls:
-        entity_ids = source_controls + volume_controls
-        event.async_track_state_change(hass, entity_ids, hass_state_event)
-        for entity_id in entity_ids:
-            entity_obj = hass.states.get(entity_id)
-            if entity_obj:
-                asyncio.run_coroutine_threadsafe(hass_state_event(entity_id, entity_obj, entity_obj), hass.loop)
-
     roon.start_roon()
 
 
@@ -178,7 +116,6 @@ class RoonDevice(MediaPlayerDevice):
         self._last_position_update = None
         self._supports_standby = False
         self._state = STATE_IDLE
-        self._fake_power_off = False
         self.update_data(player_data)
         
 
@@ -248,9 +185,6 @@ class RoonDevice(MediaPlayerDevice):
                     new_state = STATE_PAUSED
                 else:
                     new_state = STATE_IDLE
-            # treat idle as off on devices that do not support standby feature
-            if new_state == STATE_IDLE and not self.supports_standby:
-                new_state = STATE_OFF
             self._state = new_state
 
     @asyncio.coroutine
@@ -535,7 +469,7 @@ class RoonDevice(MediaPlayerDevice):
 class RoonServer(object):
     """Roon test."""
 
-    def __init__(self, hass, roonapi, add_devices_callback, custom_play_action):
+    def __init__(self, hass, roonapi, add_devices_callback, custom_play_action, source_controls, volume_controls):
         """Initialize base class."""
         self.hass = hass
         self.roonapi = roonapi
@@ -552,6 +486,10 @@ class RoonServer(object):
         self.offline_devices = []
         self._selected_player = ""
         self.custom_play_action = custom_play_action
+        self.source_controls = source_controls
+        self.volume_controls = volume_controls
+        self.registed_source_controls = []
+        self.registered_volume_controls = []
         self.roonapi.register_state_callback(self.roonapi_state_callback, event_filter=["zones_changed"])
 
 
@@ -575,6 +513,25 @@ class RoonServer(object):
         '''callbacks from the roon api websockets'''
         asyncio.run_coroutine_threadsafe(self.update_changed_players(changed_zones), self.hass.loop)
 
+    def roon_source_control_callback(self, control_key, new_state):
+        entity_obj = self.hass.states.get(control_key)
+        if "media_player" in control_key and "roon" in entity_obj.attributes.get("source_list", []):
+            if new_state == "standby" and entity_obj.attributes.get("source", "") == "roon":
+                self.hass.services.call('media_player', "turn_off", {"entity_id": control_key})
+            elif new_state == "convenience_switch":
+                self.hass.services.call('media_player', "select_source", {"entity_id": control_key, "source": "roon"})
+        else:
+            # just use on/off control
+            svc = "turn_off" if new_state == "standby" else "turn_on"
+            self.hass.services.call('homeassistant', svc, {"entity_id": control_key})
+
+    def roon_volume_control_callback(self, control_key, event, data):
+        if event == "set_mute":
+            self.hass.services.call('media_player', "volume_mute", {"entity_id": control_key, "is_volume_muted": data})
+        elif event == "set_volume":
+            hass_vol = data/100
+            self.hass.services.call('media_player', "volume_set", {"entity_id": control_key, "volume_level": hass_vol})
+
     def add_update_callback(self, callback, device):
         """Register as callback for when a matching device changes."""
         self._update_callbacks.append([callback, device])
@@ -594,7 +551,7 @@ class RoonServer(object):
                 self.hass.loop.call_soon(callback, dev_id)
 
     @asyncio.coroutine
-    def update_volume(self, dev_id, dev_name):
+    def update_volume_slider(self, dev_id, dev_name):
         ''' update volume slider if needed'''
         if self._selected_player != dev_name or not self._init_playlists_done:
             return False
@@ -607,44 +564,73 @@ class RoonServer(object):
         return True
 
     @asyncio.coroutine
-    def hass_event(self, changed_entity, from_state="", to_state=""):
-        _LOGGER.debug("hass_event event fired !! --> %s changed" % (changed_entity))
+    def update_source_control(self, entity_id, old_state, new_state):
+        ''' update the entity state to the roon source/volume control '''
+        entity_obj = self.hass.states.get(entity_id)
+        if entity_id in self.source_controls:
+            old_state = old_state.state if old_state else None
+            if "media_player" in entity_id and "roon" in entity_obj.attributes.get("source_list", []):
+                if new_state.attributes.get("source", "") == "roon":
+                    src_state = "selected"
+                elif new_state.state == "off":
+                    src_state = "standby"
+                else:
+                    src_state = "deselected"
+            else:
+                src_state = "selected" if new_state.state == "on" else "standby"
+            if not entity_id in self.registed_source_controls:
+                # register as source control
+                self.registed_source_controls.append(entity_id)
+                self.roonapi.register_source_control(entity_id, entity_obj.attributes.get("friendly_name"), self.roon_source_control_callback, src_state)
+            else:
+                new_state = new_state.state if new_state else None
+                self.roonapi.update_source_control(entity_id, src_state)
+        if entity_id in self.volume_controls:
+            cur_vol = entity_obj.attributes.get("volume_level", 0) * 100
+            cur_mute = entity_obj.attributes.get("is_volume_muted", False)
+            if not entity_id in self.registered_volume_controls:
+                # register as volume control
+                self.registered_volume_controls.append(entity_id)
+                self.roonapi.register_volume_control(entity_id, entity_obj.attributes.get("friendly_name"), self.roon_volume_control_callback, cur_vol, is_muted=cur_mute)
+            else:
+                self.roonapi.update_volume_control(entity_id, cur_vol, cur_mute)
 
-        if changed_entity == "input_select.roon_players":
-            selected_player = to_state.state
-            self._selected_player = selected_player
-        else:
-            selected_player = self.hass.states.get("input_select.roon_players").state
-        
-        if changed_entity == "input_select.roon_playlists":
-            selected_playlist = to_state.state
-        else:
-            selected_playlist = None
-        
+    @asyncio.coroutine
+    def input_select_players_updated(self, selected_player):
+        ''' the input select with players has changed state '''
+        self._selected_player = selected_player
         player_volume = 0
         player_entity = ""
-        player_state = STATE_OFF
-
         # get player entity_id and volume level
         for dev in self._devices.values():
             if dev.name == selected_player:
                 player_volume = dev.volume_level
                 player_entity = dev.entity_id
-                player_state = dev.state
                 break
-        
-        # show volume slider as 0 if player is turned off
-        if player_state == STATE_OFF:
-            player_volume = 0
-
-        if changed_entity == "input_select.roon_playlists" and selected_playlist == self._initial_playlist:
-            # the playlist-selector was restored to default selection, ignore...
-            return
-        elif selected_player == self._initial_player:
-            # the player-selector was restored to default selection, ignore...
+        if selected_player == self._initial_player:
+            # the player-selector was restored to the default selection, ignore...
             yield from self.hass.services.async_call("input_number", "set_value", 
                     {"entity_id": "input_number.roon_volume", "value": 0})
-        elif changed_entity == "input_select.roon_playlists" and ": " in selected_playlist:
+        else:
+            # new player chosen - set volume slider
+            _LOGGER.debug("update volumeslider for player %s to %s" %(player_entity, player_volume))
+            yield from self.hass.services.async_call("input_number", "set_value", 
+                {"entity_id": "input_number.roon_volume", "value": player_volume})
+
+    @asyncio.coroutine
+    def input_select_playlists_updated(self, selected_playlist):
+        ''' the input select with playlists has changed state '''
+        selected_player = self.hass.states.get("input_select.roon_players").state
+        # get player entity_id
+        player_entity = ""
+        for dev in self._devices.values():
+            if dev.name == selected_player:
+                player_entity = dev.entity_id
+                break
+        if selected_playlist == self._initial_playlist:
+            # the playlist-selector was restored to default selection, ignore...
+            return
+        elif ": " in selected_playlist:
             # new playlist chosen, start playback
             media_content_type = selected_playlist.split(": ")[0]
             media_content_id = selected_playlist.replace(media_content_type + ": ", "")
@@ -654,35 +640,55 @@ class RoonServer(object):
             # restore playlist selector to default value
             yield from self.hass.services.async_call("input_select", "select_option", 
                 {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
-        elif changed_entity == "input_select.roon_players":
-            # new player chosen - set volume slider
-            _LOGGER.debug("update volumeslider for player %s to %s" %(player_entity, player_volume))
-            yield from self.hass.services.async_call("input_number", "set_value", 
-                {"entity_id": "input_number.roon_volume", "value": player_volume})
         
-        # volume slider was adjusted
-        elif changed_entity == "input_number.roon_volume" and player_entity:
-            selected_volume = float(to_state.state)
-            # new player chosen - set volume slider
-            if selected_volume == 0:
-                # volume slider set to 0, treat this as power off
-                yield from asyncio.sleep(0.5, self.hass.loop)
-                # double check to prevent some race condition
-                if self.hass.states.get("input_select.roon_players").state == self._initial_player:
-                    return
-                _LOGGER.debug("turn off player %s" %(player_entity))
-                yield from self.hass.services.async_call("media_player", "turn_off", 
+    @asyncio.coroutine
+    def volume_slider_updated(self, selected_volume):
+        ''' event fired when the volume slider is changed '''
+        selected_player = self.hass.states.get("input_select.roon_players").state
+        player_volume = 0
+        player_entity = ""
+        player_state = STATE_OFF
+        # get player entity_id and volume level
+        for dev in self._devices.values():
+            if dev.name == selected_player:
+                player_volume = dev.volume_level
+                player_entity = dev.entity_id
+                player_state = dev.state
+                break
+        if not player_entity:
+            return
+        if selected_volume == 0:
+            # volume slider set to 0, treat this as power off
+            yield from asyncio.sleep(0.5, self.hass.loop)
+            # double check to prevent some race condition
+            if self.hass.states.get("input_select.roon_players").state == self._initial_player:
+                return
+            _LOGGER.debug("turn off player %s" %(player_entity))
+            yield from self.hass.services.async_call("media_player", "turn_off", 
+                {"entity_id": player_entity})
+        else:
+            # volume slider changed, set new volume and turn on player if needed
+            if player_state == STATE_OFF:
+                _LOGGER.debug("turn on player %s" %(player_entity))
+                yield from self.hass.services.async_call("media_player", "turn_on", 
                     {"entity_id": player_entity})
-            else:
-                # volume slider changed, set new volume and turn on player if needed
-                if player_state == STATE_OFF:
-                    _LOGGER.debug("turn on player %s" %(player_entity))
-                    yield from self.hass.services.async_call("media_player", "turn_on", 
-                        {"entity_id": player_entity})
-                if selected_volume != player_volume:
-                    _LOGGER.debug("change volume for player %s to %s" %(player_entity, selected_volume))
-                    yield from self.hass.services.async_call("media_player", "volume_set", 
-                        {"entity_id": player_entity, "volume_level": selected_volume})
+            if selected_volume != player_volume:
+                _LOGGER.debug("change volume for player %s to %s" %(player_entity, selected_volume))
+                yield from self.hass.services.async_call("media_player", "volume_set", 
+                    {"entity_id": player_entity, "volume_level": selected_volume})
+
+    @asyncio.coroutine
+    def hass_event(self, changed_entity, from_state, to_state):
+        ''' event fired when one of our monitored entities changes state '''
+        _LOGGER.debug("hass_event event fired !! --> %s changed" % (changed_entity))
+        if changed_entity in self.source_controls or changed_entity in self.volume_controls:
+            return self.update_source_control(changed_entity, from_state, to_state)
+        elif changed_entity == "input_select.roon_players":
+            return self.input_select_players_updated(to_state.state)
+        elif changed_entity == "input_select.roon_players":
+            return self.input_select_players_updated(to_state.state)
+        elif changed_entity == "input_number.roon_volume":
+            return self.volume_slider_updated(float(to_state.state))
 
     @asyncio.coroutine
     def do_loop(self):
@@ -731,7 +737,7 @@ class RoonServer(object):
                         self._devices[dev_id].set_available(True)
                     self._devices[dev_id].update_data(player_data)
                     self._do_update_callback(dev_id)
-                    yield from self.update_volume(dev_id, dev_name)
+                    yield from self.update_volume_slider(dev_id, dev_name)
 
         if new_devices:
             force_playlist_update = True
@@ -740,14 +746,11 @@ class RoonServer(object):
         if force_playlist_update and self._init_playlists_done:
             yield from self.update_playlists()
 
-
     @asyncio.coroutine
     def update_players(self):
         ''' periodic scan of all devices'''
-
         devs = self.roonapi.zones.keys()
         yield from self.update_changed_players(devs)
-
         # check for any removed devices
         for dev_id, dev in self._devices.items():
             if dev.output_id not in self.roonapi.outputs and dev_id not in self.offline_devices:
@@ -757,7 +760,6 @@ class RoonServer(object):
                     self.offline_devices.append(dev_id)
                     self._devices[dev_id].set_available(False)
                     self._do_update_callback(dev_id)
-
 
     @asyncio.coroutine        
     def update_playlists(self):
@@ -820,6 +822,15 @@ class RoonServer(object):
         if not self._init_playlists_done:
             self._init_playlists_done = True
             track_entities = ["input_select.roon_playlists", "input_select.roon_players", "input_number.roon_volume"]
+            # also register the source/volume controls and send current state
+            if self.source_controls or self.volume_controls:
+                entity_ids = self.source_controls + self.volume_controls
+                track_entities += entity_ids
+                for entity_id in entity_ids:
+                    entity_obj = self.hass.states.get(entity_id)
+                    if entity_obj:
+                        # send current state right away if the entity is already present in hass
+                        asyncio.run_coroutine_threadsafe(self.update_source_control(entity_id, entity_obj, entity_obj), self.hass.loop)
             event.async_track_state_change(self.hass, track_entities, self.hass_event)
         _LOGGER.debug("updated playlists")
         return True
