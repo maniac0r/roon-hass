@@ -40,7 +40,7 @@ except AttributeError:
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['roonapi>=0.0.15']
+REQUIREMENTS = ['roonapi>=0.0.16']
 
 TOKEN_FILE = '.roontoken'
 
@@ -53,7 +53,7 @@ CONF_VOLUME_CONTROLS = 'volume_controls'
 SUPPORT_ROON = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_STOP | \
     SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SHUFFLE_SET | \
     SUPPORT_SEEK | SUPPORT_TURN_ON | SUPPORT_TURN_OFF | SUPPORT_VOLUME_MUTE | \
-    SUPPORT_PLAY | SUPPORT_PLAY_MEDIA
+    SUPPORT_PLAY | SUPPORT_PLAY_MEDIA | SUPPORT_SELECT_SOURCE
 
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -111,6 +111,7 @@ class RoonDevice(MediaPlayerDevice):
 
     def __init__(self, server, player_data):
         """Initialize Roon device object."""
+        self._sources = []
         self._server = server
         self._available = True
         self._last_position_update = None
@@ -152,6 +153,7 @@ class RoonDevice(MediaPlayerDevice):
         if player_data:
             self.player_data = player_data
         self._available = self.player_data["is_available"]
+        self._sources = self.get_sync_zones()
         # determine player state
         self.update_state()
         if self.state == STATE_PLAYING:
@@ -198,6 +200,16 @@ class RoonDevice(MediaPlayerDevice):
     def async_update_callback(self, msg):
         """Handle device updates."""
         self.async_schedule_update_ha_state()
+
+    def get_sync_zones(self):
+        ''' get available sync slaves'''
+        sync_zones = [self.name]
+        for zone in self._server.zones.values():
+            for output in zone["outputs"]:
+                if output["output_id"] in self.player_data["can_group_with_output_ids"] and zone['display_name'] not in sync_zones:
+                    sync_zones.append( zone["display_name"] )
+        _LOGGER.debug("sync_slaves for player %s: %s" % (self.name, sync_zones))
+        return sync_zones
 
     @property
     def media_position_updated_at(self):
@@ -356,6 +368,11 @@ class RoonDevice(MediaPlayerDevice):
     def source(self):
         """Name of the current input source."""
         return self.player_data['zone_name']
+
+    @property
+    def source_list(self):
+        """List of available input sources."""
+        return self._sources
         
     @property
     def shuffle(self):
@@ -439,6 +456,22 @@ class RoonDevice(MediaPlayerDevice):
     def shuffle_set(self, shuffle):
         """ Set shuffle state on zone """
         return self._server.roonapi.shuffle(self.output_id, shuffle)
+
+    def async_select_source(self, source):
+        '''select source on player (used to sync/unsync)'''
+        _LOGGER.info("select source called - unsync %s" %(self.name))
+        if source == self.name:
+            return self._server.roonapi.ungroup_outputs([self.output_id])
+        else:
+            _LOGGER.info("select source called - sync %s with %s" %(self.name, source))
+            output_ids = []
+            for zone_id, zone in self._server.zones.items():
+                if zone["display_name"].lower() == source.lower():
+                    for output in zone["outputs"]:
+                        output_ids.append(output["output_id"])
+                    output_ids.append(self.output_id)
+                    return self._server.roonapi.group_outputs(output_ids)
+        return None
 
     def play_media(self, media_type, media_id, **kwargs):
         """
@@ -620,6 +653,7 @@ class RoonServer(object):
     @asyncio.coroutine
     def input_select_playlists_updated(self, selected_playlist):
         ''' the input select with playlists has changed state '''
+        _LOGGER.debug("input_select_playlists_updated - selected playlist: %s" % selected_playlist)
         selected_player = self.hass.states.get("input_select.roon_players").state
         # get player entity_id
         player_entity = ""
@@ -680,13 +714,13 @@ class RoonServer(object):
     @asyncio.coroutine
     def hass_event(self, changed_entity, from_state, to_state):
         ''' event fired when one of our monitored entities changes state '''
-        _LOGGER.debug("hass_event event fired !! --> %s changed" % (changed_entity))
+        _LOGGER.debug("hass_event event fired --> %s changed" % (changed_entity))
         if changed_entity in self.source_controls or changed_entity in self.volume_controls:
             return self.update_source_control(changed_entity, from_state, to_state)
         elif changed_entity == "input_select.roon_players":
             return self.input_select_players_updated(to_state.state)
-        elif changed_entity == "input_select.roon_players":
-            return self.input_select_players_updated(to_state.state)
+        elif changed_entity == "input_select.roon_playlists":
+            return self.input_select_playlists_updated(to_state.state)
         elif changed_entity == "input_number.roon_volume":
             return self.volume_slider_updated(float(to_state.state))
 
@@ -724,7 +758,7 @@ class RoonServer(object):
                 player_data["is_available"] = True
                 if not dev_id in self._devices:
                     # new player added !
-                    _LOGGER.debug("New player added: %s" %player_data["display_name"])
+                    _LOGGER.debug("New player added: %s" % dev_name)
                     player = RoonDevice(self, player_data)
                     new_devices.append(player)
                     self._devices[dev_id] = player
@@ -743,7 +777,7 @@ class RoonServer(object):
             force_playlist_update = True
             self._add_devices_callback(new_devices, True)
 
-        if force_playlist_update and self._init_playlists_done:
+        if force_playlist_update:
             yield from self.update_playlists()
 
     @asyncio.coroutine
@@ -803,11 +837,11 @@ class RoonServer(object):
         # fill playlists input_select
         all_playlists = [self._initial_playlist]
         roon_playlists = self.roonapi.playlists()
-        if roon_playlists:
+        if roon_playlists and "items" in roon_playlists:
             for item in roon_playlists["items"]:
                 all_playlists.append("Playlist: %s" % item["title"])
         roon_playlists = self.roonapi.internet_radio()
-        if roon_playlists:
+        if roon_playlists and "items" in roon_playlists:
             for item in roon_playlists["items"]:
                 all_playlists.append("Radio: %s" % item["title"])
         if len(str(all_playlists)) != len(str(self.all_playlists)):
@@ -843,8 +877,9 @@ class RoonServer(object):
         new_dict.pop("outputs")
         new_dict["is_synced"] = len(zone["outputs"]) > 1
         new_dict["zone_name"] = zone["display_name"]
+        new_dict["display_name"] = output["display_name"]
         new_dict["last_changed"] = utcnow()
         # we don't use the zone_id or output_id for now as unique id as I've seen cases were it changes for some reason
-        new_dict["dev_id"] = "roon_%s" % zone["display_name"].lower().replace(" ","_").replace("-","_")
+        new_dict["dev_id"] = "roon_%s" % output["display_name"].lower().replace(" ","_").replace("-","_")
         return new_dict
 
