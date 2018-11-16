@@ -421,7 +421,11 @@ class RoonDevice(MediaPlayerDevice):
     def set_volume_level(self, volume):
         """ Send new volume_level to device. """
         volume = int(volume * 100)
-        return self._server.roonapi.change_volume(self.output_id, volume)
+        try:
+            return self._server.roonapi.change_volume(self.output_id, volume)
+        except Exception as exc:
+            _LOGGER.error("set_volume_level failed for entity %s \n %s" %(self.entity_id, str(exc)))
+            return None
 
     def mute_volume(self, mute=True):
         """ Send mute/unmute to device. """
@@ -453,7 +457,7 @@ class RoonDevice(MediaPlayerDevice):
         else:
             return self.async_media_stop()
 
-    def shuffle_set(self, shuffle):
+    def set_shuffle(self, shuffle):
         """ Set shuffle state on zone """
         return self._server.roonapi.shuffle(self.output_id, shuffle)
 
@@ -479,9 +483,9 @@ class RoonDevice(MediaPlayerDevice):
             Roon itself doesn't support playback of media by filename/url so this a bit of a workaround.
         """
         media_type = media_type.lower()
-        if (not self._server.custom_play_action and media_type == "radio") or media_type == "radio-force":
+        if media_type == "radio":
             return self._server.roonapi.play_radio(self.zone_id, media_id)
-        elif (not self._server.custom_play_action and media_type == "playlist") or media_type == "playlist-force":
+        elif "playlist":
             return self._server.roonapi.play_playlist(self.zone_id, media_id)
         elif self._server.custom_play_action:
             # reroute the play request to the given custom script
@@ -489,7 +493,7 @@ class RoonDevice(MediaPlayerDevice):
             data = {
                 "entity_id": self.entity_id,
                 "media_type": media_type,
-                "media_url": media_id,
+                "media_id": media_id,
             }
             _domain, _entity = self._server.custom_play_action.split(".")
             self.hass.services.call(_domain, _entity, data, blocking=False)
