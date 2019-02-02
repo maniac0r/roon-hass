@@ -40,7 +40,7 @@ except AttributeError:
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['roonapi>=0.0.16']
+REQUIREMENTS = ['roonapi>=0.0.20']
 
 TOKEN_FILE = '.roontoken'
 
@@ -117,6 +117,7 @@ class RoonDevice(MediaPlayerDevice):
         self._last_position_update = None
         self._supports_standby = False
         self._state = STATE_IDLE
+        self._last_playlist = None
         self.update_data(player_data)
         
 
@@ -288,6 +289,11 @@ class RoonDevice(MediaPlayerDevice):
         return self.media_artist
 
     @property
+    def media_playlist(self):
+        """Title of Playlist currently playing."""
+        return self._last_playlist
+
+    @property
     def media_image_url(self):
         """Image url of current playing media."""
         try:
@@ -392,80 +398,81 @@ class RoonDevice(MediaPlayerDevice):
 
     def media_play(self):
         """ Send play command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "play")
+        self._server.roonapi.playback_control(self.output_id, "play")
 
     def media_pause(self):
         """ Send pause command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "pause")
+        self._server.roonapi.playback_control(self.output_id, "pause")
 
     def media_play_pause(self):
         """ toggle play command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "playpause")
+        self._server.roonapi.playback_control(self.output_id, "playpause")
 
     def media_stop(self):
         """ Send stop command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "stop")
+        self._server.roonapi.playback_control(self.output_id, "stop")
 
     def media_next_track(self):
         """ Send next track command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "next")
+        self._server.roonapi.playback_control(self.output_id, "next")
 
     def media_previous_track(self):
         """ Send previous track command to device. """
-        return self._server.roonapi.playback_control(self.output_id, "previous")
+        self._server.roonapi.playback_control(self.output_id, "previous")
 
     def media_seek(self, position):
         """ Send seek command to device. """
-        return self._server.roonapi.seek(self.output_id, position)
+        self._server.roonapi.seek(self.output_id, position)
 
     def set_volume_level(self, volume):
         """ Send new volume_level to device. """
         volume = int(volume * 100)
         try:
-            return self._server.roonapi.change_volume(self.output_id, volume)
+            self._server.roonapi.change_volume(self.output_id, volume)
         except Exception as exc:
             _LOGGER.error("set_volume_level failed for entity %s \n %s" %(self.entity_id, str(exc)))
-            return None
 
     def mute_volume(self, mute=True):
         """ Send mute/unmute to device. """
-        return self._server.roonapi.mute(self.output_id, mute)
+        self._server.roonapi.mute(self.output_id, mute)
 
     def volume_up(self):
         """ Send new volume_level to device. """
-        return self._server.roonapi.change_volume(self.output_id, 3, "relative")
+        self._server.roonapi.change_volume(self.output_id, 3, "relative")
 
     def volume_down(self):
         """ Send new volume_level to device. """
-        return self._server.roonapi.change_volume(self.output_id, -3, "relative")
+        self._server.roonapi.change_volume(self.output_id, -3, "relative")
 
     def turn_on(self):
         """ Turn on device (if supported) """
         if self.supports_standby and 'source_controls' in self.player_data:
             for source in self.player_data["source_controls"]:
                 if source["supports_standby"] and source["status"] != "indeterminate":
-                    return self._server.roonapi.convenience_switch(self.output_id, source["control_key"])
+                    self._server.roonapi.convenience_switch(self.output_id, source["control_key"])
+                    break
         else:
-            return self.async_media_play()
+            return self.media_play()
 
     def turn_off(self):
         """ Turn off device (if supported) """
         if self.supports_standby and 'source_controls' in self.player_data:
             for source in self.player_data["source_controls"]:
                 if source["supports_standby"] and not source["status"] == "indeterminate":
-                    return self._server.roonapi.standby(self.output_id, source["control_key"])
+                    self._server.roonapi.standby(self.output_id, source["control_key"])
+                    break
         else:
-            return self.async_media_stop()
+            return self.media_stop()
 
     def set_shuffle(self, shuffle):
         """ Set shuffle state on zone """
-        return self._server.roonapi.shuffle(self.output_id, shuffle)
+        self._server.roonapi.shuffle(self.output_id, shuffle)
 
-    def async_select_source(self, source):
+    def select_source(self, source):
         '''select source on player (used to sync/unsync)'''
         _LOGGER.info("select source called - unsync %s" %(self.name))
         if source == self.name:
-            return self._server.roonapi.ungroup_outputs([self.output_id])
+            self._server.roonapi.ungroup_outputs([self.output_id])
         else:
             _LOGGER.info("select source called - sync %s with %s" %(self.name, source))
             output_ids = []
@@ -474,8 +481,8 @@ class RoonDevice(MediaPlayerDevice):
                     for output in zone["outputs"]:
                         output_ids.append(output["output_id"])
                     output_ids.append(self.output_id)
-                    return self._server.roonapi.group_outputs(output_ids)
-        return None
+                    self._server.roonapi.group_outputs(output_ids)
+                    break
 
     def play_media(self, media_type, media_id, **kwargs):
         """
@@ -484,9 +491,19 @@ class RoonDevice(MediaPlayerDevice):
         """
         media_type = media_type.lower()
         if media_type == "radio":
-            return self._server.roonapi.play_radio(self.zone_id, media_id)
-        elif "playlist":
-            return self._server.roonapi.play_playlist(self.zone_id, media_id)
+            if self._server.roonapi.play_radio(self.zone_id, media_id):
+                self._last_playlist = media_id
+                self._last_media = media_id
+        elif media_type == "playlist":
+            if self._server.roonapi.play_playlist(self.zone_id, media_id, shuffle=False):
+                self._last_playlist = media_id
+        elif media_type == "shuffleplaylist":
+            if self._server.roonapi.play_playlist(self.zone_id, media_id, shuffle=True):
+                self._last_playlist = media_id
+        elif media_type == "queueplaylist":
+            self._server.roonapi.queue_playlist(self.zone_id, media_id)
+        elif media_type == "genre":
+            self._server.roonapi.play_genre(self.zone_id, media_id)
         elif self._server.custom_play_action:
             # reroute the play request to the given custom script
             _LOGGER.debug("Playback requested. Will forward to custom script/action: %s" % self._server.custom_play_action)
@@ -497,14 +514,12 @@ class RoonDevice(MediaPlayerDevice):
             }
             _domain, _entity = self._server.custom_play_action.split(".")
             self.hass.services.call(_domain, _entity, data, blocking=False)
-            return True
         else:
             _LOGGER.info("Playback requested of unsupported type: %s --> %s" %(media_type, media_id))
-            return False
 
 
 class RoonServer(object):
-    """Roon test."""
+    """Roon Server class - holds the connection to Roon websockets api."""
 
     def __init__(self, hass, roonapi, add_devices_callback, custom_play_action, source_controls, volume_controls):
         """Initialize base class."""
@@ -618,7 +633,8 @@ class RoonServer(object):
             if not entity_id in self.registed_source_controls:
                 # register as source control
                 self.registed_source_controls.append(entity_id)
-                self.roonapi.register_source_control(entity_id, entity_obj.attributes.get("friendly_name"), self.roon_source_control_callback, src_state)
+                self.roonapi.register_source_control(entity_id, entity_obj.attributes.get("friendly_name"), 
+                        self.roon_source_control_callback, src_state)
             else:
                 new_state = new_state.state if new_state else None
                 self.roonapi.update_source_control(entity_id, src_state)
@@ -628,7 +644,8 @@ class RoonServer(object):
             if not entity_id in self.registered_volume_controls:
                 # register as volume control
                 self.registered_volume_controls.append(entity_id)
-                self.roonapi.register_volume_control(entity_id, entity_obj.attributes.get("friendly_name"), self.roon_volume_control_callback, cur_vol, is_muted=cur_mute)
+                self.roonapi.register_volume_control(entity_id, entity_obj.attributes.get("friendly_name"), 
+                        self.roon_volume_control_callback, cur_vol, is_muted=cur_mute)
             else:
                 self.roonapi.update_volume_control(entity_id, cur_vol, cur_mute)
 
@@ -668,13 +685,15 @@ class RoonServer(object):
         if selected_playlist == self._initial_playlist:
             # the playlist-selector was restored to default selection, ignore...
             return
-        elif ": " in selected_playlist:
+        else:
             # new playlist chosen, start playback
-            media_content_type = selected_playlist.split(": ")[0]
-            media_content_id = selected_playlist.replace(media_content_type + ": ", "")
-            _LOGGER.info("start %s %s on player %s" %(media_content_type, media_content_id, player_entity))
+            if selected_playlist in self.roonapi.internet_radio():
+                media_content_type = "radio"
+            else:
+                media_content_type = "playlist"
+            _LOGGER.info("start %s %s on player %s" %(media_content_type, selected_playlist, player_entity))
             yield from self.hass.services.async_call("media_player", "play_media", 
-                    {"entity_id": player_entity, "media_content_id": media_content_id, "media_content_type": media_content_type})
+                    {"entity_id": player_entity, "media_content_id": selected_playlist, "media_content_type": media_content_type})
             # restore playlist selector to default value
             yield from self.hass.services.async_call("input_select", "select_option", 
                 {"entity_id": "input_select.roon_playlists", "option": self._initial_playlist})
@@ -842,12 +861,10 @@ class RoonServer(object):
         all_playlists = [self._initial_playlist]
         roon_playlists = self.roonapi.playlists()
         if roon_playlists and "items" in roon_playlists:
-            for item in roon_playlists["items"]:
-                all_playlists.append("Playlist: %s" % item["title"])
+            all_playlists += [item["title"] for item in roon_playlists["items"]]
         roon_playlists = self.roonapi.internet_radio()
         if roon_playlists and "items" in roon_playlists:
-            for item in roon_playlists["items"]:
-                all_playlists.append("Radio: %s" % item["title"])
+            all_playlists += [item["title"] for item in roon_playlists["items"]]
         if len(str(all_playlists)) != len(str(self.all_playlists)):
             # only send update to hass if there were changes
             self.all_playlists = all_playlists
